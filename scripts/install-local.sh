@@ -160,6 +160,10 @@ require_cmd() {
 REPO_ROOT=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 cd "$REPO_ROOT"
 
+# Allow Node 24+ built-in fetch() used by frontend/scripts/*.mjs (tmux,
+# cloudflared, agent-browser, electron downloads) to honor HTTP_PROXY/HTTPS_PROXY.
+export NODE_USE_ENV_PROXY="${NODE_USE_ENV_PROXY:-1}"
+
 install_ao_binary() {
 	local src="$1"
 	[ -f "$src" ] || {
