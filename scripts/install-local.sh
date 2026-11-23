@@ -321,6 +321,42 @@ prepare_package_assets() {
 	(cd "$REPO_ROOT/frontend" && npm run browser-runtime:prepare && npm run cloudflared:prepare && npm run build:acp-runtime)
 }
 
+configure_chrome_sandbox() {
+	local app_dir="$1"
+	local sandbox="${app_dir}/chrome-sandbox"
+	[ -e "$sandbox" ] || return 0
+
+	# Already root-owned SUID 4755.
+	if [ "$(stat -L -c '%u:%a' "$sandbox" 2>/dev/null || true)" = "0:4755" ]; then
+		return 0
+	fi
+
+	# On Ubuntu 24.04+ (kernel.apparmor_restrict_unprivileged_userns=1), Chromium
+	# aborts if chrome-sandbox is present without root:root 4755. If an identical
+	# root-owned 4755 chrome-sandbox already exists from a system install, link
+	# to it so package mode keeps full sandboxing without needing sudo.
+	local built_hash=""
+	built_hash=$(sha256sum "$sandbox" 2>/dev/null | awk '{print $1}')
+	local candidate="/usr/lib/agent-orchestrator/chrome-sandbox"
+	if [ -f "$candidate" ] && [ "$(stat -L -c '%u:%a' "$candidate" 2>/dev/null || true)" = "0:4755" ]; then
+		local cand_hash
+		cand_hash=$(sha256sum "$candidate" 2>/dev/null | awk '{print $1}')
+		if [ -n "$built_hash" ] && [ "$built_hash" = "$cand_hash" ]; then
+			step "link chrome-sandbox → $candidate (root:root 4755)"
+			ln -sfn "$candidate" "$sandbox"
+			return 0
+		fi
+	fi
+
+	local restricted=""
+	restricted=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || true)
+	if [ "$restricted" = "1" ]; then
+		printf 'install-local: warning: %s is not root-owned 4755 and unprivileged userns is restricted by AppArmor.\n' "$sandbox" >&2
+		printf '  Run once to enable Chromium SUID sandbox:\n' >&2
+		printf '    sudo chown root:root "%s" && sudo chmod 4755 "%s"\n' "$sandbox" "$sandbox" >&2
+	fi
+}
+
 verify_ao() {
 	step "verify ao"
 	if command -v ao >/dev/null 2>&1; then
@@ -395,6 +431,7 @@ case "$MODE" in
 		fi
 		mv "${APP_DIR}.new" "$APP_DIR"
 		rm -rf "${APP_DIR}.old"
+		configure_chrome_sandbox "$APP_DIR"
 
 		if [ -f "$APP_DIR/resources/daemon/ao" ]; then
 			install_ao_binary "$APP_DIR/resources/daemon/ao"
