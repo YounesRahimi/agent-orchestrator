@@ -25,7 +25,7 @@ PREFIX="${HOME}/.local/bin"
 APP_DIR="${XDG_DATA_HOME:-${HOME}/.local/share}/agent-orchestrator"
 SKIP_DEPS=0
 SKIP_PREPARE=0
-UPDATE_DESKTOP=0
+UPDATE_DESKTOP=1
 NO_DPKG=0
 
 usage() {
@@ -42,18 +42,19 @@ Options:
                                  (default: ~/.local/share/agent-orchestrator).
   --skip-deps                    Skip frontend dependency install (`npm ci` / `dev:warm`).
   --skip-prepare                 Skip prepackage/premake/dev-prepare asset builds.
-  --update-desktop               Update ~/.local/share/applications/agent-orchestrator.desktop
-                                 to launch the installed wrapper.
+  --no-desktop                   Skip updating ~/.local/share/applications/agent-orchestrator.desktop.
   --no-dpkg                      Deb mode: build .deb without running `sudo dpkg -i`.
   -h, --help                     Show this help.
 
 Modes:
   package   Builds the Go daemon and packaged Electron app (no sudo). Installs
-            the bundle into --app-dir and wrappers into --prefix.
+            the bundle into --app-dir, writes wrappers into --prefix, and
+            auto-patches the desktop entry with TZ/proxy fixes.
   dev       Runs `npm run dev:warm` and installs a wrapper that runs
             `electron-forge start` directly from this checkout.
   daemon    Builds only the Go `ao` CLI/daemon and installs it into --prefix.
-  deb       Builds a Debian package and installs it system-wide via dpkg.
+  deb       Builds a Debian package, installs it system-wide via dpkg, and
+            re-patches the ~/.local/bin wrapper and desktop entry.
 EOF
 }
 
@@ -105,6 +106,10 @@ while [ $# -gt 0 ]; do
 			;;
 		--update-desktop)
 			UPDATE_DESKTOP=1
+			shift
+			;;
+		--no-desktop)
+			UPDATE_DESKTOP=0
 			shift
 			;;
 		--no-dpkg)
@@ -184,9 +189,31 @@ set -euo pipefail
 export TZ="\${AO_TZ:-UTC}"
 export NODE_USE_ENV_PROXY="\${NODE_USE_ENV_PROXY:-1}"
 
+proxy_args=()
+proxy_url="\${HTTPS_PROXY:-\${HTTP_PROXY:-\${https_proxy:-\${http_proxy:-}}}}"
+if [ -n "\$proxy_url" ]; then
+	has_proxy_flag=0
+	for arg in "\$@"; do
+		case "\$arg" in
+			--proxy-server|--proxy-server=*) has_proxy_flag=1; break ;;
+		esac
+	done
+	if [ "\$has_proxy_flag" -eq 0 ]; then
+		bypass="\${NO_PROXY:-\${no_proxy:-localhost,127.0.0.1,::1}}"
+		bypass="\${bypass//,/;}"
+		proxy_args=("--proxy-server=\${proxy_url}" "--proxy-bypass-list=\${bypass}")
+	fi
+fi
+
 ${target_cmd}
 EOF
 	chmod 755 "$wrapper"
+}
+
+extract_desktop_env() {
+	local file="$1" key="$2"
+	[ -f "$file" ] || return 0
+	sed -n "s/^Exec=.* ${key}=\([^[:space:]]*\).*/\1/p" "$file" | head -n 1
 }
 
 update_desktop_entry() {
@@ -195,32 +222,57 @@ update_desktop_entry() {
 	local icon_dest="${XDG_DATA_HOME:-${HOME}/.local/share}/icons/hicolor/1024x1024/apps/agent-orchestrator.png"
 	local icon_src="${REPO_ROOT}/frontend/assets/icon.png"
 
-	step "update desktop entry ($desktop_file)"
+	step "patch desktop entry ($desktop_file)"
 	mkdir -p "$desktop_dir"
 	if [ -f "$icon_src" ]; then
 		mkdir -p "$(dirname -- "$icon_dest")"
 		cp "$icon_src" "$icon_dest"
+		if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+			gtk-update-icon-cache -f -t "${XDG_DATA_HOME:-${HOME}/.local/share}/icons/hicolor" >/dev/null 2>&1 || true
+		fi
 	fi
 
+	# Prefer current environment proxy settings; fall back to preserving any
+	# proxy settings already baked into the existing .desktop file.
+	local http_p="${HTTP_PROXY:-${http_proxy:-$(extract_desktop_env "$desktop_file" HTTP_PROXY)}}"
+	local https_p="${HTTPS_PROXY:-${https_proxy:-$(extract_desktop_env "$desktop_file" HTTPS_PROXY)}}"
+	local no_p="${NO_PROXY:-${no_proxy:-$(extract_desktop_env "$desktop_file" NO_PROXY)}}"
+	local env_prefix="env TZ=UTC NODE_USE_ENV_PROXY=1"
 	local proxy_args=""
-	if [ -n "${HTTPS_PROXY:-${HTTP_PROXY:-}}" ]; then
-		local proxy_url="${HTTPS_PROXY:-${HTTP_PROXY}}"
-		proxy_args=" --proxy-server=${proxy_url} \"--proxy-bypass-list=localhost;127.0.0.1;::1\""
+
+	if [ -n "$http_p" ]; then
+		env_prefix="${env_prefix} HTTP_PROXY=${http_p}"
+	fi
+	if [ -n "$https_p" ]; then
+		env_prefix="${env_prefix} HTTPS_PROXY=${https_p}"
+	fi
+	if [ -n "$no_p" ]; then
+		env_prefix="${env_prefix} NO_PROXY=${no_p}"
+	fi
+
+	local proxy_url="${https_p:-$http_p}"
+	if [ -n "$proxy_url" ]; then
+		local bypass="${no_p:-localhost,127.0.0.1,::1}"
+		bypass="${bypass//,/;}"
+		proxy_args=" --proxy-server=${proxy_url} \"--proxy-bypass-list=${bypass}\""
 	fi
 
 	cat >"$desktop_file" <<EOF
 [Desktop Entry]
 Name=Orchestrator
-Comment=Agent Orchestrator (local fork build)
+Comment=Electron + TypeScript frontend for the agent-orchestrator rewrite
 GenericName=Orchestrator
-Exec=${PREFIX}/agent-orchestrator${proxy_args} %U
+Exec=${env_prefix} ${PREFIX}/agent-orchestrator${proxy_args} %U
 Icon=${icon_dest}
 Type=Application
 StartupNotify=true
 StartupWMClass=Orchestrator
-Categories=Development;Utility;
+Categories=GNOME;GTK;Utility;
 MimeType=x-scheme-handler/ao-app;
 EOF
+	if command -v desktop-file-validate >/dev/null 2>&1; then
+		desktop-file-validate "$desktop_file"
+	fi
 	if command -v update-desktop-database >/dev/null 2>&1; then
 		update-desktop-database "$desktop_dir" >/dev/null 2>&1 || true
 	fi
@@ -276,7 +328,7 @@ case "$MODE" in
 			(cd "$REPO_ROOT/frontend" && node ./scripts/build-daemon.mjs --dev)
 			install_ao_binary "$REPO_ROOT/frontend/daemon/ao"
 		fi
-		write_launcher_wrapper "cd \"$REPO_ROOT/frontend\" && exec ./node_modules/.bin/electron-forge start -- \"\$@\""
+		write_launcher_wrapper "cd \"$REPO_ROOT/frontend\" && exec ./node_modules/.bin/electron-forge start -- \${proxy_args[@]+\"\${proxy_args[@]}\"} \"\$@\""
 		[ "$UPDATE_DESKTOP" -eq 1 ] && update_desktop_entry
 		verify_ao
 		done_step "installed (dev) → $PREFIX/agent-orchestrator + $PREFIX/ao"
@@ -315,7 +367,7 @@ case "$MODE" in
 		elif [ -f "$REPO_ROOT/frontend/daemon/ao" ]; then
 			install_ao_binary "$REPO_ROOT/frontend/daemon/ao"
 		fi
-		write_launcher_wrapper "exec \"$APP_DIR/agent-orchestrator\" \"\$@\""
+		write_launcher_wrapper "exec \"$APP_DIR/agent-orchestrator\" \${proxy_args[@]+\"\${proxy_args[@]}\"} \"\$@\""
 		[ "$UPDATE_DESKTOP" -eq 1 ] && update_desktop_entry
 		verify_ao
 		done_step "installed (package) → $APP_DIR (wrappers in $PREFIX)"
@@ -341,6 +393,8 @@ case "$MODE" in
 		if [ "$NO_DPKG" -eq 0 ]; then
 			step "install $deb_file via sudo dpkg -i"
 			sudo dpkg -i "$deb_file"
+			write_launcher_wrapper "exec /usr/bin/agent-orchestrator \${proxy_args[@]+\"\${proxy_args[@]}\"} \"\$@\""
+			[ "$UPDATE_DESKTOP" -eq 1 ] && update_desktop_entry
 		else
 			printf 'note: --no-dpkg set; skipping dpkg install of %s\n' "$deb_file"
 		fi

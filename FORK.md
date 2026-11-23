@@ -29,8 +29,10 @@ scripts/install-local.sh --mode deb            # build + install Linux .deb via 
 | `--app-dir DIR` | Package mode bundle location (default: `~/.local/share/agent-orchestrator`). |
 | `--skip-deps` | Skip `npm ci` / dependency install. |
 | `--skip-prepare` | Skip `prepackage` / `premake` / `dev-prepare` asset builds. |
-| `--update-desktop` | Update `~/.local/share/applications/agent-orchestrator.desktop`. |
+| `--no-desktop` | Skip auto-patching `~/.local/share/applications/agent-orchestrator.desktop`. |
 | `--no-dpkg` | In `deb` mode, build the `.deb` without running `sudo dpkg -i`. |
+
+Desktop installs (`package`, `dev`, `deb`) automatically rewrite `~/.local/bin/agent-orchestrator` and `~/.local/share/applications/agent-orchestrator.desktop` with `TZ=UTC`, `NODE_USE_ENV_PROXY=1`, and current (or previously configured) proxy settings.
 
 ## Sync & Update (`scripts/update-local.sh`)
 
