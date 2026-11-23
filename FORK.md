@@ -12,6 +12,7 @@ This fork (`YounesRahimi/agent-orchestrator`) tracks `OrchestratorInc/agent-orch
 - Go (matching `backend/go.mod`)
 - Node.js & npm
 - `git`
+- `bison` (or `byacc`) if building bundled `tmux` from source (reused automatically from an existing install when absent)
 
 ## Local Build & Install (`scripts/install-local.sh`)
 

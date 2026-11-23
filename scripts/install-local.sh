@@ -289,6 +289,38 @@ ensure_frontend_deps() {
 	fi
 }
 
+prepare_bundled_tmux() {
+	if command -v bison >/dev/null 2>&1 || command -v byacc >/dev/null 2>&1 || command -v yacc >/dev/null 2>&1; then
+		step "build bundled tmux (npm run build:tmux)"
+		(cd "$REPO_ROOT/frontend" && npm run build:tmux)
+		return 0
+	fi
+
+	local expected_ver=""
+	expected_ver=$(sed -n 's/^export const BUNDLED_TMUX_VERSION = "\([^"]*\)".*/\1/p' "$REPO_ROOT/frontend/scripts/tmux-version.mjs" | head -n 1)
+	local candidate
+	for candidate in "$APP_DIR/resources/tmux" "/usr/lib/agent-orchestrator/resources/tmux"; do
+		if [ -x "$candidate/bin/tmux" ] && [ "$("$candidate/bin/tmux" -V 2>/dev/null || true)" = "tmux ${expected_ver}" ]; then
+			step "reuse prebuilt bundled tmux ${expected_ver} from $candidate (bison/yacc not installed)"
+			rm -rf "$REPO_ROOT/frontend/tmux"
+			cp -a "$candidate" "$REPO_ROOT/frontend/tmux"
+			return 0
+		fi
+	done
+
+	printf 'install-local: bison/byacc/yacc not found on PATH (required to build bundled tmux %s)\n' "${expected_ver:-}" >&2
+	printf '  Install with: sudo apt install bison\n' >&2
+	exit 1
+}
+
+prepare_package_assets() {
+	step "prepare daemon & browser extension"
+	(cd "$REPO_ROOT/frontend" && npm run build:daemon && npm run build:browser-extension)
+	prepare_bundled_tmux
+	step "prepare browser runtime, cloudflared, and ACP runtime"
+	(cd "$REPO_ROOT/frontend" && npm run browser-runtime:prepare && npm run cloudflared:prepare && npm run build:acp-runtime)
+}
+
 verify_ao() {
 	step "verify ao"
 	if command -v ao >/dev/null 2>&1; then
@@ -343,12 +375,10 @@ case "$MODE" in
 		require_cmd npm
 		ensure_frontend_deps
 		if [ "$SKIP_PREPARE" -eq 0 ]; then
-			step "build packaged Electron app (npm run package)"
-			(cd "$REPO_ROOT/frontend" && npm run package)
-		else
-			step "package Electron app without prepackage (electron-forge package)"
-			(cd "$REPO_ROOT/frontend" && ./node_modules/.bin/electron-forge package)
+			prepare_package_assets
 		fi
+		step "package Electron app (electron-forge package)"
+		(cd "$REPO_ROOT/frontend" && ./node_modules/.bin/electron-forge package)
 
 		packaged_dir=$(find "$REPO_ROOT/frontend/out" -maxdepth 1 -mindepth 1 -type d -name 'Agent Orchestrator-linux-*' | head -n 1 || true)
 		if [ -z "$packaged_dir" ] || [ ! -x "$packaged_dir/agent-orchestrator" ]; then
@@ -382,8 +412,7 @@ case "$MODE" in
 		require_cmd npm
 		ensure_frontend_deps
 		if [ "$SKIP_PREPARE" -eq 0 ]; then
-			step "prepare assets for .deb (npm run premake)"
-			(cd "$REPO_ROOT/frontend" && npm run premake)
+			prepare_package_assets
 		fi
 		step "build Linux .deb package (electron-forge make --targets=@electron-forge/maker-deb)"
 		(cd "$REPO_ROOT/frontend" && ./node_modules/.bin/electron-forge make --targets=@electron-forge/maker-deb)
